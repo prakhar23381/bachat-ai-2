@@ -1,0 +1,22 @@
+# User Interface (To be built from scratch)
+frontend/
+
+# Personal Data & Database (CRITICAL PRIVACY)
+*.db
+*.sqlite
+*.sqlite3
+transactions.db
+*.xlsx
+*.csv
+*.xls
+
+# Python environments
+.venv/
+env/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS Files
+.DS_Store
