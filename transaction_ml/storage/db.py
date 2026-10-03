@@ -48,7 +48,13 @@ class EncryptedStorage:
                     upi_data TEXT
                 )
             ''')
-            
+
+            # Migration: Ensure upi_data column exists if db was created prior to upi_data addition
+            cursor.execute("PRAGMA table_info(transactions)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'upi_data' not in columns:
+                cursor.execute('ALTER TABLE transactions ADD COLUMN upi_data TEXT')
+
             # Subcategories table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS subcategories (

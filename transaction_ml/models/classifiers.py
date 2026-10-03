@@ -15,12 +15,22 @@ class GlobalClassifier:
             self.model = model
             
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if not hasattr(self.model, "classes_") or self.model.classes_ is None:
+            n_samples = X.shape[0] if len(X.shape) > 1 else 1
+            n_classes = len(CANONICAL_CATEGORIES)
+            return np.ones((n_samples, n_classes)) / n_classes
         return self.model.predict_proba(X)
         
     def get_classes(self) -> np.ndarray:
+        if not hasattr(self.model, "classes_") or self.model.classes_ is None:
+            return np.array(CANONICAL_CATEGORIES)
         return self.model.classes_
         
     def get_weights(self) -> Tuple[np.ndarray, np.ndarray]:
+        if not hasattr(self.model, "coef_"):
+            n_classes = len(CANONICAL_CATEGORIES)
+            # Default zero weights fallback
+            return np.zeros((n_classes, 1)), np.zeros((n_classes,))
         return self.model.coef_, self.model.intercept_
 
 
