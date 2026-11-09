@@ -13,12 +13,16 @@ TEXT_FEATURES = 10_000
 AMOUNT_SCALE = 0.1
 
 
+_HONORIFIC = re.compile(r"^(mr|mrs|miss|ms|shri|smt|dr) ")
+
+
 def normalize_merchant_name(name: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace. Also the merchant-memory key."""
+    """Lowercase, strip punctuation/honorifics, collapse whitespace. Also the merchant-memory key."""
     if not name:
         return ""
     name = re.sub(r"[^a-z0-9\s]", "", name.lower())
-    return re.sub(r"\s+", " ", name).strip()
+    name = re.sub(r"\s+", " ", name).strip()
+    return _HONORIFIC.sub("", name)
 
 
 class FeatureExtractor:

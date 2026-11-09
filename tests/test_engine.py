@@ -8,10 +8,10 @@ from transaction_ml.models.core import UNCATEGORIZED, ModelConfig
 from transaction_ml.system import LEGACY_DEFAULT_SECRET, TransactionEngine, derive_fernet_key
 
 TRAINING = [
-    ("SWIGGY", "Food & Dining"), ("ZOMATO", "Food & Dining"),
-    ("UBER INDIA", "Transport"), ("OLA CABS", "Transport"),
-    ("AIRTEL PREPAID", "Utilities"), ("NETFLIX", "Entertainment"),
-    ("AMAZON", "Shopping"), ("APOLLO PHARMACY", "Health & Wellness"),
+    ("SWIGGY", "outside food"), ("ZOMATO", "outside food"),
+    ("UBER INDIA", "travel"), ("OLA CABS", "travel"),
+    ("AIRTEL PREPAID", "phone"), ("NETFLIX", "entertainment"),
+    ("AMAZON", "personal items"), ("APOLLO PHARMACY", "health food"),
 ]
 
 
@@ -28,25 +28,25 @@ def test_untrained_engine_returns_uncategorized(engine):
 
 
 def test_one_correction_activates_merchant_memory(engine):
-    engine.correct(txn("NETFLIX", 1), "Entertainment")
+    engine.correct(txn("NETFLIX", 1), "entertainment")
     pred = engine.predict(txn("Netflix", 2))  # normalised match
-    assert (pred.category, pred.source, pred.confidence) == ("Entertainment", "merchant_memory", 1.0)
+    assert (pred.category, pred.source, pred.confidence) == ("entertainment", "merchant_memory", 1.0)
 
 
 def test_conflicting_correction_resets_memory_streak(db_path):
     engine = TransactionEngine(db_path, SECRET, ModelConfig(memory_activation_threshold=2))
-    engine.correct(txn("CAFE", 1), "Food & Dining")
+    engine.correct(txn("CAFE", 1), "outside food")
     assert engine.predict(txn("CAFE", 9)).source != "merchant_memory"
-    engine.correct(txn("CAFE", 2), "Food & Dining")
+    engine.correct(txn("CAFE", 2), "outside food")
     assert engine.predict(txn("CAFE", 9)).source == "merchant_memory"
-    engine.correct(txn("CAFE", 3), "Business")
+    engine.correct(txn("CAFE", 3), "mess food")
     assert engine.predict(txn("CAFE", 9)).source != "merchant_memory"
 
 
 def test_model_generalises_to_unseen_merchant_variants(engine):
     train(engine)
-    for variant, expected in [("SWIGGY INSTAMART", "Food & Dining"), ("UBER TRIP", "Transport"),
-                              ("AIRTEL BROADBAND", "Utilities"), ("AMAZON RETAIL", "Shopping")]:
+    for variant, expected in [("SWIGGY INSTAMART", "outside food"), ("UBER TRIP", "travel"),
+                              ("AIRTEL BROADBAND", "phone"), ("AMAZON RETAIL", "personal items")]:
         pred = engine.predict(txn(variant, 20))
         assert (pred.category, pred.source) == (expected, "model"), variant
 
@@ -63,25 +63,25 @@ def test_learning_survives_restart(engine, db_path):
     before = [engine.predict(txn(v, 20)).category for v in ("SWIGGY INSTAMART", "UBER TRIP", "NETFLIX")]
     restarted = TransactionEngine(db_path, SECRET)
     after = [restarted.predict(txn(v, 20)).category for v in ("SWIGGY INSTAMART", "UBER TRIP", "NETFLIX")]
-    assert before == after == ["Food & Dining", "Transport", "Entertainment"]
+    assert before == after == ["outside food", "travel", "entertainment"]
     assert restarted.predict(txn("NETFLIX", 20)).source == "merchant_memory"
 
 
 def test_reingest_does_not_overwrite_corrections(engine):
     t = txn("MYSTERY SHOP")
     engine.ingest([t])
-    engine.correct(t, "Business")
-    assert engine.ingest([txn("MYSTERY SHOP")]) == 0
-    assert engine.storage.get_transaction(t.id).category == "Business"
+    engine.correct(t, "mess food")
+    assert engine.ingest([txn("MYSTERY SHOP")]) == []
+    assert engine.storage.get_transaction(t.id).category == "mess food"
 
 
 def test_correction_reclassifies_pending_rows(engine):
     rows = [txn("SWIGGY", d) for d in range(1, 5)]
     engine.ingest(rows)
     assert all(engine.storage.get_transaction(t.id).category == UNCATEGORIZED for t in rows)
-    changed = engine.correct(rows[0], "Food & Dining")
+    changed = engine.correct(rows[0], "outside food")
     assert changed == 3
-    assert {engine.storage.get_transaction(t.id).category for t in rows} == {"Food & Dining"}
+    assert {engine.storage.get_transaction(t.id).category for t in rows} == {"outside food"}
     assert [engine.storage.get_transaction(t.id).verified for t in rows] == [True, False, False, False]
 
 
@@ -125,9 +125,12 @@ def test_legacy_db_is_migrated_with_backup(tmp_path):
         conn.execute("CREATE TABLE transactions (id TEXT PRIMARY KEY, encrypted_merchant BLOB, encrypted_amount BLOB, "
                      "date TEXT, encrypted_notes BLOB, account_id TEXT, category TEXT, subcategory TEXT, splits TEXT)")
     engine = TransactionEngine(str(path), SECRET)
-    assert (tmp_path / "old.db.bak-pre-verified").exists()
+    assert (tmp_path / "old.db.bak-v0").exists()
     engine.ingest([txn("X")])
     assert engine.storage.get_transaction(txn("X").id).verified is False
+    # reopening an up-to-date DB makes no further backups
+    TransactionEngine(str(path), SECRET)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["old.db", "old.db.bak-v0"]
 
 
 def test_shared_upi_gateway_does_not_make_strangers_look_familiar(engine):

@@ -2,12 +2,18 @@ import base64
 import binascii
 import os
 import warnings
-from typing import List, Optional
+from dataclasses import dataclass
+from datetime import datetime
+from typing import List, Optional, Tuple
 
 from transaction_ml.engine.rules import MerchantMemory
 from transaction_ml.features.extractor import FeatureExtractor
 from transaction_ml.models.classifiers import CategoryClassifier
-from transaction_ml.models.core import CANONICAL_CATEGORIES, UNCATEGORIZED, ModelConfig, Prediction, Transaction
+from transaction_ml.ingestion.sms_parser import parse_sms
+from transaction_ml.models.core import (
+    EXPENSE, INCOME, MONEY_RECEIVED, PROTECTED_CATEGORIES, SPLIT, UNCATEGORIZED,
+    ModelConfig, Prediction, Transaction,
+)
 from transaction_ml.storage.db import EncryptedStorage
 
 # The original code shipped this hardcoded key. Kept only so DBs created with it
@@ -37,17 +43,29 @@ def derive_fernet_key(secret: str) -> bytes:
     return base64.urlsafe_b64encode(secret.encode("utf-8")[:32].ljust(32, b"0"))
 
 
+@dataclass
+class SmsResult:
+    status: str                            # "added" | "duplicate" | "ignored"
+    transaction: Optional[Transaction] = None
+    balance_gap: float = 0.0               # != 0: an SMS was probably missed (signed amount)
+
+    @property
+    def needs_review(self) -> bool:
+        return self.status == "added" and self.transaction.category == UNCATEGORIZED
+
+
 class TransactionEngine:
     """
     Categorisation pipeline, in priority order:
-      1. Merchant memory: exact merchant match from previous user corrections.
-      2. Logistic regression on hashed text + amount/date features, retrained from
-         every user-verified transaction. Only trusted when the merchant name looks
-         like one already verified and the probability is high enough.
-      3. Otherwise "Uncategorized", which puts the row in the Active Learning queue.
+      0. Credits (money in) are always "Money received".
+      1. Merchant memory: exact payee match from previous user corrections.
+      2. Logistic regression on hashed text + amount/time features, retrained from
+         every user-verified debit. Only trusted when the payee name looks like one
+         already verified and the probability is high enough.
+      3. Otherwise "Uncategorized" = needs the user's answer.
 
-    Only verified rows (user corrections) are ever used as training data, and
-    unverified rows are re-predicted after every correction.
+    Only verified debits are training data; unverified rows are re-predicted after
+    every correction or category change.
     """
 
     def __init__(self, db_path: str, secret: str, config: Optional[ModelConfig] = None):
@@ -57,6 +75,51 @@ class TransactionEngine:
         self.classifier = CategoryClassifier()
         self.memory = MerchantMemory(self.config, self.storage.load_merchant_memory())
         self.retrain()
+
+    # ---- categories -----------------------------------------------------------
+
+    def categories(self) -> List[Tuple[str, str]]:
+        return self.storage.get_categories()
+
+    def _require(self, name: str, *, exists: bool):
+        if (name in self.storage.category_names()) != exists:
+            raise ValueError(f"Category {name!r} {'does not exist' if exists else 'already exists'}")
+
+    def add_category(self, name: str, kind: str = EXPENSE):
+        name = name.strip()
+        if not name or name == UNCATEGORIZED:
+            raise ValueError("Invalid category name")
+        if kind not in (EXPENSE, INCOME, SPLIT):
+            raise ValueError(f"Unknown kind {kind!r}")
+        self._require(name, exists=False)
+        self.storage.add_category(name, kind)
+
+    def rename_category(self, old: str, new: str):
+        """Renaming onto an existing category merges the two."""
+        new = new.strip()
+        self._require(old, exists=True)
+        if old in PROTECTED_CATEGORIES or not new or new == UNCATEGORIZED:
+            raise ValueError(f"Cannot rename {old!r} to {new!r}")
+        if new in self.storage.category_names():
+            self.storage.delete_category(old)
+        else:
+            self.storage.rename_category(old, new)
+        self.storage.recategorize(old, new)
+        self._reload()
+
+    def delete_category(self, name: str):
+        """Its transactions go back to Uncategorized (and get re-predicted)."""
+        self._require(name, exists=True)
+        if name in PROTECTED_CATEGORIES:
+            raise ValueError(f"{name!r} cannot be deleted")
+        self.storage.delete_category(name)
+        self.storage.recategorize(name, UNCATEGORIZED, unverify=True)
+        self._reload()
+
+    def _reload(self):
+        self.memory = MerchantMemory(self.config, self.storage.load_merchant_memory())
+        self.retrain()
+        self.reclassify_unverified()
 
     # ---- prediction -----------------------------------------------------------
 
@@ -70,7 +133,9 @@ class TransactionEngine:
         preds = []
         for t, result in zip(transactions, model_out):
             rule = self.memory.predict(t)
-            if rule:
+            if t.amount > 0:
+                preds.append(Prediction(t.id, MONEY_RECEIVED, 1.0, "rule"))
+            elif rule:
                 preds.append(Prediction(t.id, rule["category"], 1.0, "merchant_memory", rule.get("subcategory")))
             elif result is None:
                 preds.append(Prediction(t.id, UNCATEGORIZED, 0.0, "fallback"))
@@ -86,14 +151,13 @@ class TransactionEngine:
 
     # ---- writes -----------------------------------------------------------------
 
-    def ingest(self, transactions: List[Transaction]) -> int:
+    def ingest(self, transactions: List[Transaction]) -> List[Transaction]:
         """
-        Classify and store new transactions. Rows whose id already exists are
-        skipped, so re-uploading a statement never overwrites corrections.
-        Returns the number of newly stored rows.
+        Classify and store new transactions; returns the ones actually added.
+        Existing ids are skipped, so re-imports never overwrite corrections.
         """
-        existing = self.storage.existing_ids([t.id for t in transactions])
-        new, seen = [], set(existing)
+        seen = self.storage.existing_ids([t.id for t in transactions])
+        new = []
         for t in transactions:
             if t.id not in seen:
                 new.append(t)
@@ -101,21 +165,46 @@ class TransactionEngine:
         for t, pred in zip(new, self.predict_many(new)):
             t.category, t.subcategory = pred.category, pred.subcategory
         self.storage.insert_transactions(new)
-        return len(new)
+        return new
+
+    def ingest_sms(self, text: str, received_at: Optional[datetime] = None) -> SmsResult:
+        sms = parse_sms(text, received_at)
+        if sms is None:
+            self.storage.save_unparsed_sms(text, received_at)
+            return SmsResult("ignored")
+
+        t = Transaction(
+            id=sms.id,
+            merchant_name=sms.payee or "Incoming transfer",
+            amount=sms.amount,
+            date=sms.timestamp,
+            account_id=sms.account_last4,
+            source="sms",
+            balance=sms.balance,
+        )
+        if not self.ingest([t]):
+            return SmsResult("duplicate", self.storage.get_transaction(t.id))
+
+        gap = 0.0
+        last = self.storage.get_meta("last_balance")
+        if last is not None:
+            gap = round(sms.balance - (float(last) + sms.amount), 2)
+        self.storage.set_meta("last_balance", str(sms.balance))
+        return SmsResult("added", t, gap)
 
     def correct(self, transaction: Transaction, category: str, subcategory: Optional[str] = None) -> int:
         """
         Apply a user correction, retrain, and re-predict every unverified row.
         Returns how many other rows changed category as a result.
         """
-        if category not in CANONICAL_CATEGORIES:
-            raise ValueError(f"Unknown category: {category!r}")
+        if category != UNCATEGORIZED:
+            self._require(category, exists=True)
 
         transaction.category, transaction.subcategory = category, subcategory
         transaction.verified = category != UNCATEGORIZED
         self.storage.insert_transaction(transaction)
 
-        if transaction.verified:
+        if transaction.verified and transaction.amount < 0:
             record = self.memory.update(transaction, category, subcategory)
             self.storage.save_merchant_memory(MerchantMemory.key(transaction), record)
 
@@ -123,7 +212,7 @@ class TransactionEngine:
         return self.reclassify_unverified()
 
     def retrain(self):
-        verified = [t for t in self.storage.get_all_transactions() if t.verified]
+        verified = [t for t in self.storage.get_all_transactions() if t.verified and t.amount < 0]
         self.classifier.fit(
             self.features.transform(verified) if verified else None,
             [t.category for t in verified],

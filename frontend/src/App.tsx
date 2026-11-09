@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Upload, CheckCircle, RefreshCw, EyeOff, SplitSquareHorizontal, Eye, X, Plus } from 'lucide-react';
+import { Upload, CheckCircle, RefreshCw, SplitSquareHorizontal, X, Plus, Pencil, Trash2 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend } from 'recharts';
 import { format, parseISO } from 'date-fns';
 import './index.css';
@@ -29,14 +29,44 @@ interface Transaction {
   upi?: UPIData | null;
 }
 
-const API_URL = 'http://localhost:8000/api';
+interface Category {
+  name: string;
+  kind: 'expense' | 'income' | 'split';
+}
+
+const MONEY_RECEIVED = 'Money received';
+const TOKEN_KEY = 'bachat-token';
+
+const readToken = () => { try { return localStorage.getItem(TOKEN_KEY) ?? ''; } catch { return ''; } };
+const writeToken = (t: string) => { try { if (t) { localStorage.setItem(TOKEN_KEY, t); } else { localStorage.removeItem(TOKEN_KEY); } } catch { /* storage unavailable */ } };
+
+class Unauthorized extends Error {}
+
+// All API calls go through here: same-origin /api (Vite proxies it in dev) + bearer token.
+async function api(path: string, init: RequestInit = {}): Promise<Response> {
+  const res = await fetch(`/api${path}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), Authorization: `Bearer ${readToken()}` },
+  });
+  if (res.status === 401) throw new Unauthorized();
+  return res;
+}
+
+const iconButton: React.CSSProperties = { background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' };
+const textInput: React.CSSProperties = {
+  flex: 1, padding: '0.5rem', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)',
+  background: 'rgba(0,0,0,0.2)', color: 'inherit',
+};
 
 function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [categories, setCategories] = useState<string[]>([]);
+  const [categoryList, setCategoryList] = useState<Category[]>([]);
+  const categories = categoryList.map(c => c.name);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [showPrivate, setShowPrivate] = useState(false);
+  const [authed, setAuthed] = useState(readToken() !== '');
+  const [tokenInput, setTokenInput] = useState('');
+  const [newCategory, setNewCategory] = useState('');
 
   // Edit State
   const [editingTxnId, setEditingTxnId] = useState<string | null>(null);
@@ -44,8 +74,8 @@ function App() {
   // Split Modal State
   const [splitTxn, setSplitTxn] = useState<Transaction | null>(null);
   const [splitValue1, setSplitValue1] = useState<number>(0);
-  const [splitCat1, setSplitCat1] = useState<string>('Food & Dining');
-  const [splitCat2, setSplitCat2] = useState<string>('Shared / Receivables');
+  const [splitCat1, setSplitCat1] = useState<string>('outside food');
+  const [splitCat2, setSplitCat2] = useState<string>('Friends / splits');
 
   // Date Filtering
   const [filterMonth, setFilterMonth] = useState<string>('all');
@@ -59,18 +89,23 @@ function App() {
   const [manualDate, setManualDate] = useState(format(new Date(), "yyyy-MM-dd'T'HH:mm"));
 
   useEffect(() => {
+    if (!authed) return;
     fetchData();
     fetchCategories();
-  }, []);
+    // fetchData/fetchCategories are recreated each render; only re-run on sign-in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
+
+  const signOut = () => { writeToken(''); setAuthed(false); };
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/transactions`);
+      const res = await api(`/transactions`);
       const data = await res.json();
       setTransactions(data);
     } catch (e) {
-      console.error(e);
+      if (e instanceof Unauthorized) signOut(); else console.error(e);
     } finally {
       setLoading(false);
     }
@@ -78,9 +113,9 @@ function App() {
 
   const fetchCategories = async () => {
     try {
-      const res = await fetch(`${API_URL}/categories`);
+      const res = await api(`/categories`);
       const data = await res.json();
-      setCategories(data.categories);
+      setCategoryList(data.categories);
     } catch (e) {
       console.error(e);
     }
@@ -95,7 +130,7 @@ function App() {
     
     setUploading(true);
     try {
-      const res = await fetch(`${API_URL}/upload`, {
+      const res = await api(`/upload`, {
         method: "POST",
         body: formData,
       });
@@ -113,7 +148,7 @@ function App() {
 
   const handleCorrect = async (id: string, newCategory: string) => {
     try {
-      const res = await fetch(`${API_URL}/transactions/${id}/correct`, {
+      const res = await api(`/transactions/${id}/correct`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ category: newCategory, subcategory: null })
@@ -144,7 +179,7 @@ function App() {
     ];
     
     try {
-      const res = await fetch(`${API_URL}/transactions/${splitTxn.id}/split`, {
+      const res = await api(`/transactions/${splitTxn.id}/split`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ splits })
@@ -163,7 +198,7 @@ function App() {
     
     setLoading(true);
     try {
-      await fetch(`${API_URL}/transactions/manual`, {
+      await api(`/transactions/manual`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -183,10 +218,43 @@ function App() {
     }
   };
 
+  const categoryRequest = async (path: string, method: string, body?: object) => {
+    try {
+      const res = await api(`/categories${path}`, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail);
+      setCategoryList(data.categories);
+      await fetchData(); // renames/deletes recategorise transactions
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Request failed');
+    }
+  };
+
+  const addCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCategory.trim()) return;
+    await categoryRequest('', 'POST', { name: newCategory.trim() });
+    setNewCategory('');
+  };
+
+  const renameCategory = (name: string) => {
+    const next = window.prompt(`Rename "${name}" to (an existing name merges them):`, name);
+    if (next && next.trim() && next.trim() !== name) categoryRequest(`/${encodeURIComponent(name)}`, 'PATCH', { new_name: next.trim() });
+  };
+
+  const deleteCategory = (name: string) => {
+    if (window.confirm(`Delete "${name}"? Its transactions go back to Uncategorized.`)) {
+      categoryRequest(`/${encodeURIComponent(name)}`, 'DELETE');
+    }
+  };
+
   const getCategoryClass = (category: string) => {
     if (!category) return 'bg-default';
     if (category === 'Uncategorized') return 'bg-uncategorized';
-    if (category === 'Private') return 'bg-private';
     
     const lower = category.toLowerCase();
     if (lower.includes('food')) return 'bg-food';
@@ -197,8 +265,6 @@ function App() {
   };
 
   const filteredTransactions = transactions.filter(t => {
-    if (t.category === 'Private' && !showPrivate) return false;
-    
     const d = parseISO(t.date);
     if (filterYear !== 'all' && d.getFullYear().toString() !== filterYear) return false;
     if (filterMonth !== 'all' && d.getMonth().toString() !== filterMonth) return false;
@@ -206,9 +272,10 @@ function App() {
     return true;
   });
 
-  const categoryData = categories.map(c => {
+  // Spending chart: only "expense" categories (not money received / friends).
+  const categoryData = categoryList.filter(c => c.kind === 'expense').map(({ name: c }) => {
     const value = filteredTransactions
-      .filter(t => t.category === c && t.amount < 0 && c !== 'Uncategorized')
+      .filter(t => t.category === c && t.amount < 0)
       .reduce((acc, t) => acc + Math.abs(t.amount), 0);
     return { name: c, value };
   }).filter(d => d.value > 0).sort((a,b) => b.value - a.value);
@@ -227,12 +294,27 @@ function App() {
   const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4', '#f97316', '#ef4444'];
 
 
+  if (!authed) {
+    return (
+      <div className="modal-overlay">
+        <form className="glass-panel modal-content" onSubmit={e => { e.preventDefault(); writeToken(tokenInput.trim()); setAuthed(true); }}>
+          <h3 style={{ marginBottom: '1rem' }}>Bachat AI</h3>
+          <div className="form-group">
+            <label>Access token</label>
+            <input type="password" required autoFocus value={tokenInput} onChange={e => setTokenInput(e.target.value)} placeholder="BACHAT_API_TOKEN" />
+          </div>
+          <button className="btn" type="submit" style={{ width: '100%' }}>Unlock</button>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="app-container">
       <header>
         <div>
           <h1>Bachat AI</h1>
-          <p style={{color: 'var(--text-muted)', marginTop: '4px'}}>Local Privacy-First Machine Learning</p>
+          <p style={{color: 'var(--text-muted)', marginTop: '4px'}}>Your spending, categorised as it happens</p>
         </div>
         <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
            {(loading || uploading) && <RefreshCw className="animate-spin text-muted" size={20} />}
@@ -246,11 +328,7 @@ function App() {
                    onClick={() => setShowManualModal(true)}>
              <Plus size={18} /> Add
            </button>
-           <button className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
-                   onClick={() => setShowPrivate(!showPrivate)}>
-             {showPrivate ? <Eye size={18} /> : <EyeOff size={18} />}
-             {showPrivate ? "Vault Unlocked" : "Unlock Vault"}
-           </button>
+           <button className="btn btn-secondary" onClick={signOut}>Sign out</button>
         </div>
       </header>
 
@@ -268,8 +346,8 @@ function App() {
               />
               <label htmlFor="file-upload" style={{ cursor: 'pointer', display: 'block' }}>
                 <Upload size={48} color="var(--accent-primary)" style={{ margin: '0 auto 1rem' }} />
-                <h3>Upload Bank Statement</h3>
-                <p style={{ color: 'var(--text-muted)', marginTop: '0.5rem' }}>Excel or CSV supported. 100% Local.</p>
+                <h3>Waiting for your first bank SMS</h3>
+                <p style={{ color: 'var(--text-muted)', marginTop: '0.5rem' }}>Or upload a past statement (.xlsx / .csv) to backfill history.</p>
                 {uploading && <p style={{ color: '#10b981', marginTop: '1rem' }}>Processing ML categorizations...</p>}
               </label>
             </div>
@@ -361,7 +439,6 @@ function App() {
                             style={{ cursor: 'pointer' }}
                             title="Click to change category"
                           >
-                            {t.category === 'Private' && <EyeOff size={12} />}
                             {t.category}
                             {t.verified && <CheckCircle size={12} aria-label="confirmed by you" />}
                           </div>
@@ -425,7 +502,7 @@ function App() {
                   </div>
                   
                   <div className="category-grid">
-                    {categories.filter(c => c !== 'Uncategorized').map(c => (
+                    {categories.filter(c => c !== MONEY_RECEIVED).map(c => (
                       <button 
                         key={c}
                         onClick={() => handleCorrect(uncategorized[0].id, c)}
@@ -439,9 +516,28 @@ function App() {
               </div>
             ) : (
               <p style={{ color: 'var(--text-muted)' }}>
-                {transactions.length > 0 ? "All caught up." : "Upload a file to begin."}
+                {transactions.length > 0 ? "All caught up." : "Nothing to label yet."}
               </p>
             )}
+          </div>
+
+          <div className="glass-panel" style={{ marginTop: '1.5rem' }}>
+            <h3 style={{ marginBottom: '1rem' }}>Categories</h3>
+            {categoryList.map(c => (
+              <div key={c.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.35rem 0' }}>
+                <span>{c.name} {c.kind !== 'expense' && <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>({c.kind})</span>}</span>
+                {c.name !== MONEY_RECEIVED && (
+                  <span style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button onClick={() => renameCategory(c.name)} title="Rename / merge" aria-label={`Rename ${c.name}`} style={iconButton}><Pencil size={14} /></button>
+                    <button onClick={() => deleteCategory(c.name)} title="Delete" aria-label={`Delete ${c.name}`} style={iconButton}><Trash2 size={14} /></button>
+                  </span>
+                )}
+              </div>
+            ))}
+            <form onSubmit={addCategory} style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+              <input value={newCategory} onChange={e => setNewCategory(e.target.value)} placeholder="New category" style={textInput} />
+              <button className="btn" type="submit" aria-label="Add category"><Plus size={16} /></button>
+            </form>
           </div>
         </div>
       </div>

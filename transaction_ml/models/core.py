@@ -1,29 +1,29 @@
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Dict
 
-# Fixed set of top-level categories. The model can only ever predict one of these.
-CANONICAL_CATEGORIES = [
-    "Food & Dining",
-    "Shopping",
-    "Transport",
-    "Housing",
-    "Utilities",
-    "Health & Wellness",
-    "Entertainment",
-    "Travel",
-    "Education",
-    "Personal Care",
-    "Income",
-    "Transfers",
-    "Fees & Charges",
-    "Business",
-    "Shared / Receivables",  # split bills and IOUs
-    "Private",               # hidden in the UI until "vault" is unlocked
-    "Uncategorized",
-]
+# Category kinds: "expense" counts towards spending, "income" is money in,
+# "split" is money paid on behalf of / to friends (not your own spending).
+EXPENSE, INCOME, SPLIT = "expense", "income", "split"
 
-UNCATEGORIZED = "Uncategorized"
+UNCATEGORIZED = "Uncategorized"     # system: "needs a label"; not stored in the categories table
+MONEY_RECEIVED = "Money received"   # system: every credit lands here
+FRIENDS = "Friends / splits"
+
+# Seeded into a new DB; editable afterwards (add / rename / merge / delete).
+DEFAULT_CATEGORIES = [
+    ("travel", EXPENSE),
+    ("outside food", EXPENSE),
+    ("mess food", EXPENSE),
+    ("personal items", EXPENSE),
+    ("health food", EXPENSE),
+    ("phone", EXPENSE),
+    ("entertainment", EXPENSE),
+    (FRIENDS, SPLIT),
+    (MONEY_RECEIVED, INCOME),
+]
+PROTECTED_CATEGORIES = {MONEY_RECEIVED}
 
 
 @dataclass
@@ -49,6 +49,8 @@ class Transaction:
     splits: Optional[List[Dict]] = None   # [{"amount": float, "category": str}, ...]
     upi: Optional[UPIData] = None
     verified: bool = False  # True once the user has confirmed/corrected the category
+    source: str = "statement"         # "sms" | "statement" | "manual"
+    balance: Optional[float] = None   # account balance after this txn (from SMS)
 
 
 @dataclass
@@ -56,7 +58,7 @@ class Prediction:
     transaction_id: str
     category: str
     confidence: float
-    source: str  # "merchant_memory" | "model" | "fallback"
+    source: str  # "rule" | "merchant_memory" | "model" | "fallback"
     subcategory: Optional[str] = None
     all_probabilities: Dict[str, float] = field(default_factory=dict)
 
@@ -76,3 +78,9 @@ class ModelConfig:
     # How many consistent user corrections of the same merchant before the
     # merchant -> category rule bypasses the model entirely.
     memory_activation_threshold: int = 1
+
+
+def rrn_id_for(t: Transaction) -> Optional[str]:
+    """UPI payments carry a 12-digit reference (RRN) in both SMS and statements."""
+    ref = t.upi.txn_id if t.upi else None
+    return f"rrn:{ref}" if ref and re.fullmatch(r"\d{12}", ref) else None
