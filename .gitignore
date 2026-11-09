@@ -1,22 +1,25 @@
-# User Interface (To be built from scratch)
-frontend/
-
-# Personal Data & Database (CRITICAL PRIVACY)
+# Personal financial data: never commit
 *.db
+*.db.bak-*
 *.sqlite
 *.sqlite3
-transactions.db
 *.xlsx
-*.csv
 *.xls
+*.csv
 
-# Python environments
+# Python
 .venv/
-env/
 venv/
+env/
 __pycache__/
 *.pyc
 .pytest_cache/
 
-# OS Files
+# Frontend build artefacts
+frontend/node_modules/
+frontend/dist/
+
+# OS / editor
 .DS_Store
+.vscode/
+.idea/

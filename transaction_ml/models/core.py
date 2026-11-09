@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Dict
 
-# Standard set of canonical categories (Level 1)
+# Fixed set of top-level categories. The model can only ever predict one of these.
 CANONICAL_CATEGORIES = [
     "Food & Dining",
     "Shopping",
@@ -18,10 +18,13 @@ CANONICAL_CATEGORIES = [
     "Transfers",
     "Fees & Charges",
     "Business",
-    "Shared / Receivables", # For split bills and IOUs
-    "Private",              # For hidden/sensitive expenses
-    "Uncategorized"
+    "Shared / Receivables",  # split bills and IOUs
+    "Private",               # hidden in the UI until "vault" is unlocked
+    "Uncategorized",
 ]
+
+UNCATEGORIZED = "Uncategorized"
+
 
 @dataclass
 class UPIData:
@@ -32,62 +35,44 @@ class UPIData:
     handle_or_gateway: str
     note: str
 
+
 @dataclass
 class Transaction:
-    """Represents a single financial transaction."""
     id: str
     merchant_name: str
-    amount: float
+    amount: float          # negative = money out, positive = money in
     date: datetime
     notes: Optional[str] = None
     account_id: Optional[str] = None
-    # For labeled data (either by user or ground truth in training)
     category: Optional[str] = None
     subcategory: Optional[str] = None
-    
-    # Support for shared bills (e.g. McDonald's: Part Food, Part Shared Receivable)
-    splits: Optional[List[Dict]] = None
-    
-    # Optional destructured UPI metadata
+    splits: Optional[List[Dict]] = None   # [{"amount": float, "category": str}, ...]
     upi: Optional[UPIData] = None
-    
-    def __post_init__(self):
-        if self.category and self.category not in CANONICAL_CATEGORIES:
-            # Allow fallback or initialization checks, but primarily we enforce canonical parents
-            pass
+    verified: bool = False  # True once the user has confirmed/corrected the category
+
 
 @dataclass
 class Prediction:
-    """Output prediction for a transaction."""
     transaction_id: str
     category: str
     confidence: float
-    source: str  # "global_model", "user_model", "merchant_memory"
+    source: str  # "merchant_memory" | "model" | "fallback"
     subcategory: Optional[str] = None
     all_probabilities: Dict[str, float] = field(default_factory=dict)
 
-@dataclass
-class CategoryDef:
-    """Definition for categories and user-defined subcategories."""
-    name: str
-    parent: Optional[str] = None # If None, it's a canonical category
-    is_active: bool = True       # Subcategories need minimum evidence to become active
-    is_hidden: bool = False      # Hide from UI without biometric auth (e.g. Private -> Alcohol)
 
 @dataclass
 class ModelConfig:
-    """Global configuration for the ML system."""
-    gold_confidence_threshold: float = 0.98
-    silver_confidence_threshold: float = 0.93
-    bronze_confidence_threshold: float = 0.70
-    
-    # Blending weights
-    base_user_weight: float = 0.3
-    base_global_weight: float = 0.7
-    
-    # Merchant memory
-    memory_activation_threshold: int = 3  # N consecutive identical predictions
-    
-    # Subcategory
-    subcat_activation_evidence: int = 10
-    max_subcats_per_parent: int = 7
+    # Model predictions are returned as Uncategorized (so they land in the Active
+    # Learning queue instead of silently guessing) unless BOTH hold:
+    #   - the model's probability for its top category >= min_confidence
+    #   - the text resembles some verified transaction: cosine similarity of char
+    #     n-grams >= min_similarity. Without this, totally unfamiliar merchants
+    #     get assigned whichever category has the most examples.
+    # Tuned on synthetic data (tests/test_engine.py); revisit on real statements.
+    min_confidence: float = 0.3
+    min_similarity: float = 0.3
+
+    # How many consistent user corrections of the same merchant before the
+    # merchant -> category rule bypasses the model entirely.
+    memory_activation_threshold: int = 1

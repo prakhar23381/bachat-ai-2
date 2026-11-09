@@ -1,101 +1,59 @@
+"""
+Terminal alternative to the web UI: import a statement, then label the most
+frequent uncategorized merchants interactively.
+
+    BACHAT_KEY=... python train_from_excel.py --file statement.xlsx
+"""
 import argparse
 import os
 from collections import defaultdict
+
 from transaction_ml.ingestion.excel_parser import parse_bank_statement
-from transaction_ml.system import TransactionEngine
-from transaction_ml.models.core import CANONICAL_CATEGORIES
+from transaction_ml.models.core import CANONICAL_CATEGORIES, UNCATEGORIZED
+from transaction_ml.system import TransactionEngine, load_secret
+
+MAX_QUESTIONS = 10
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Ingest and train the ML engine from a bank statement.")
-    parser.add_argument("--file", type=str, required=True, help="Path to the Excel/CSV bank statement")
-    parser.add_argument("--db", type=str, default="transactions.db", help="Path to local encrypted SQLite DB")
-    parser.add_argument("--key", type=str, default="01234567890123456789012345678901", help="32-byte Encryption Key")
-    
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--file", required=True, help="Path to the .xlsx/.csv bank statement")
+    parser.add_argument("--db", default=os.environ.get("BACHAT_DB", "transactions.db"), help="SQLite DB path")
     args = parser.parse_args()
-    
-    if not os.path.exists(args.file):
-        print(f"Error: File not found at {args.file}")
+
+    transactions = parse_bank_statement(args.file)
+    engine = TransactionEngine(db_path=args.db, secret=load_secret())
+    added = engine.ingest(transactions)
+    print(f"[*] Parsed {len(transactions)} transactions, {added} new.")
+
+    pending = defaultdict(list)
+    for t in engine.storage.get_all_transactions():
+        if t.category == UNCATEGORIZED:
+            pending[t.merchant_name].append(t)
+    if not pending:
+        print("[*] Nothing uncategorized.")
         return
-        
-    print(f"[*] Parsing statement: {args.file}")
-    try:
-        transactions = parse_bank_statement(args.file)
-    except Exception as e:
-        print(f"Error parsing file: {e}")
-        return
-        
-    print(f"[*] Found {len(transactions)} valid transactions.")
-    
-    engine = TransactionEngine(db_path=args.db, encryption_key_base64=args.key)
-    
-    # Check if this is the first time running (bootstrap needed?)
-    # We can bootstrap with dummy data if weights are untouched, or just rely on partial_fit
-    # For now, let's bootstrap with the first few transactions just to initialize dimensions
-    if not engine.user_clf._is_initialized:
-        print("[*] Blank engine detected. Bootstrapping Global Model layout...")
-        # Feed all transactions but label them 'Uncategorized' to init dimensions without bias
-        engine.bootstrap(transactions, ["Uncategorized"] * len(transactions))
-    
-    # Active Labeling Flow (Cold Start)
-    print("\n" + "="*50)
-    print("      COLD START ACTIVE LEARNING FLOW      ")
-    print("="*50)
-    print("Let's categorize your top recurring uncategorized merchants to fast-track the engine.")
-    
-    # Group by merchant name to find highest yield
-    merchant_counts = defaultdict(list)
-    for t in transactions:
-        merchant_counts[t.merchant_name].append(t)
-        
-    # Sort by frequency descending
-    sorted_merchants = sorted(merchant_counts.items(), key=lambda x: len(x[1]), reverse=True)
-    
-    labeled_count = 0
-    categories_str = ", ".join([f"[{i}] {c}" for i, c in enumerate(CANONICAL_CATEGORIES)])
-    
-    for merchant_name, txn_list in sorted_merchants:
-        if labeled_count >= 10:  # Ask for top 10 merchants only
+
+    print(f"[*] {sum(map(len, pending.values()))} uncategorized rows across {len(pending)} merchants.")
+    for i, cat in enumerate(CANONICAL_CATEGORIES):
+        print(f"  {i:>2}  {cat}")
+
+    by_frequency = sorted(pending.items(), key=lambda kv: len(kv[1]), reverse=True)
+    for merchant, rows in by_frequency[:MAX_QUESTIONS]:
+        current = engine.storage.get_transaction(rows[0].id)
+        if current.category != UNCATEGORIZED:
+            continue  # filled in by an earlier answer
+        ans = input(f"\n{merchant!r} ({len(rows)} txns, e.g. {rows[0].amount:.2f}) -> category # [s=skip, q=quit]: ").strip().lower()
+        if ans == "q":
             break
-            
-        print(f"\n? Found {len(txn_list)} transactions for: '{merchant_name}'")
-        print(f"  Example amt: {txn_list[0].amount}")
-        
-        # Check if the engine already knows it
-        pred = engine.predict(txn_list[0], store=False)
-        if pred.category != 'Uncategorized' and (pred.confidence > 0.95 or pred.source == 'merchant_memory'):
-            print(f"  -> Engine already maps this to '{pred.category}' with high confidence. Skipping.")
+        if not ans.isdigit() or int(ans) >= len(CANONICAL_CATEGORIES):
             continue
-            
-        print("Available Categories:")
-        for i, cat in enumerate(CANONICAL_CATEGORIES):
-            print(f"  {i:>2} - {cat}")
-            
-        ans = input(f"Enter Category ID (or 's' to skip): ").strip().lower()
-        if ans == 's' or not ans.isdigit():
-            continue
-            
-        try:
-            cat_idx = int(ans)
-            selected_cat = CANONICAL_CATEGORIES[cat_idx]
-        except (ValueError, IndexError):
-            print("Invalid selection. Skipping.")
-            continue
-            
-        print(f"  -> Mapping '{merchant_name}' to {selected_cat}...")
-        
-        # We only need to formally correct one or two to trigger memory and model heavily
-        # But we'll correct the first one to trigger the heavy update
-        engine.correct(txn_list[0], selected_cat)
-        labeled_count += 1
-        
-    print("\n[*] Training Complete. The system will now auto-predict the remaining items intelligently.")
-    
-    # Auto predict the rest to store them
-    print("[*] Running full batch prediction and storing securely...")
-    for t in transactions:
-        engine.predict(t, store=True)
-        
-    print("[*] Done! Data is securely encrypted in your local SQLite Database.")
+        changed = engine.correct(current, CANONICAL_CATEGORIES[int(ans)])
+        print(f"   learned; {changed} other rows updated")
+
+    left = sum(t.category == UNCATEGORIZED for t in engine.storage.get_all_transactions())
+    print(f"\n[*] Done. {left} rows still uncategorized.")
+
 
 if __name__ == "__main__":
     main()

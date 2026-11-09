@@ -1,34 +1,39 @@
-# Bachat AI: Local Privacy-First ML Engine
+# Bachat AI
 
-Bachat AI is a continuous-learning, 100% on-device local financial classification engine built with Python, FastAPI, and Scikit-Learn.
+A local, private personal-finance tracker. Upload your monthly bank statement (.xlsx or .csv),
+and it categorises every transaction based on how you've categorised similar ones before.
+Everything runs on your machine; amounts and merchant names are encrypted in a local SQLite file.
 
-## 🚀 Getting Started
+## Run it
 
-Since this repository contains exactly what you need to build the backend (and no pre-written user interface), follow these steps to deploy the API stack:
-
-### 1. Setup the Environment
 ```bash
-# Create a virtual environment
 python3 -m venv .venv
-source .venv/bin/activate
+.venv/bin/pip install -r requirements.txt
 
-# Install the engine libraries
-pip install -r requirements.txt
+# Pick a long random secret and keep it safe. Losing it means losing the data.
+export BACHAT_KEY='change-me-to-something-long-and-random'
+
+./start.sh        # API on :8000, UI on http://localhost:5173
 ```
 
-### 2. Environment Variables (Critical for Privacy)
-In `api/server.py`, the backend relies on an AES-256 Fernet key to encrypt your personal data natively inside your `transactions.db` SQLite file. 
+## Use it
 
-Feel free to modify the `KEY` parameter in `api/server.py` with your own highly secure 32-character base64 URL-safe string. Keep in mind: **If you lose this key, you lose your database data forever.**
+1. Upload a statement. Rows it can't place confidently land in **Active Learning**, sorted by how
+   often each merchant appears.
+2. Label them. Each label is applied right away to that merchant's other rows, and the model
+   retrains so similar merchant names get categorised too.
+3. Click any category badge to fix it. ✓ marks rows you've confirmed; anything else may be
+   re-predicted as the model learns.
+4. Upload next month's statement the same way (header button). Already-imported rows are skipped.
 
-### 3. Boot the Server
+Supported statement layouts: separate Debit/Credit (or Withdrawal/Deposit) columns, or one
+Amount column with an optional Dr/Cr column. Dates are read day-first (DD/MM/YYYY).
+
+## Develop
+
 ```bash
-# Start the FastAPI engine
-./start.sh
+.venv/bin/python -m pytest
+cd frontend && npm run lint && npm run build
 ```
 
-### 🧠 How It Works
-* The API runs locally on `http://localhost:8000`.
-* The `TransactionEngine` (`transaction_ml/system.py`) holds an internal `SGDClassifier`. It exposes the `.correct` and `.bootstrap` pipes so your local vectorizer continuously refines its cryptographic matrix every time you use the app.
-* No data leaves your machine. 
-* Have fun building a beautiful UI on top of this!
+See [CLAUDE.md](CLAUDE.md) for architecture, a file-by-file guide, and known limitations.
