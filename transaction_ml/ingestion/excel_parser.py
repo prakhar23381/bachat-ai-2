@@ -7,7 +7,7 @@ from typing import List, Optional, Set
 import pandas as pd
 
 from transaction_ml.ingestion.upi_parser import parse_upi_string
-from transaction_ml.models.core import Transaction
+from transaction_ml.models.core import Transaction, rrn_id_for
 
 NARRATION_WORDS = {"particulars", "narration", "description", "details", "remarks"}
 DEBIT_WORDS = {"debit", "withdrawal", "withdrawals", "dr"}
@@ -107,11 +107,15 @@ def parse_bank_statement(filepath: str) -> List[Transaction]:
         seen[base] += 1
         txn_id = hashlib.md5((base if n == 0 else f"{base}_{n}").encode()).hexdigest()
 
-        transactions.append(Transaction(
+        t = Transaction(
             id=txn_id,
             merchant_name=upi.merchant_or_person if upi else raw_merchant,
             amount=amount,
             date=date_val.to_pydatetime(),
             upi=upi,
-        ))
+            source="statement",
+        )
+        # UPI rows are keyed by their reference number so they dedupe against SMS.
+        t.id = rrn_id_for(t) or t.id
+        transactions.append(t)
     return transactions

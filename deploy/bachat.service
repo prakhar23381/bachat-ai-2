@@ -1,0 +1,16 @@
+[Unit]
+Description=Bachat AI (API + Telegram bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bachat
+WorkingDirectory=/opt/bachat
+EnvironmentFile=/etc/bachat.env
+Environment=PYTHONPATH=/opt/bachat
+ExecStart=/opt/bachat/.venv/bin/uvicorn api.server:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
