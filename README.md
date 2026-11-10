@@ -4,9 +4,10 @@ A private, real-time spending tracker. Every bank SMS is forwarded from the phon
 server, which categorises the transaction immediately into your own categories. It asks
 you only when it doesn't recognise the payee, and learns from every answer.
 
-> Work in progress. Done: SMS ingestion (IDFC FIRST Bank), learning categoriser, editable
-> categories, dashboard. Next: Telegram bot, cloud deployment with the iPhone Shortcut,
-> Splitwise sync. See [CLAUDE.md](CLAUDE.md) for the roadmap and architecture.
+> **Going live:** follow [docs/SETUP.md](docs/SETUP.md) (Telegram bot, free VM, iPhone Shortcut).
+> Done: SMS ingestion (IDFC FIRST Bank), learning categoriser, editable categories, Telegram bot
+> (your reply = the UPI note), dashboard, deploy scripts. Next: Splitwise sync.
+> Architecture and roadmap: [CLAUDE.md](CLAUDE.md).
 
 ## Run locally
 

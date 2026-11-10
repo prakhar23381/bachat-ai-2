@@ -149,3 +149,23 @@ def test_v1_db_migrates_to_users_categories(tmp_path):
     assert by_id["rrn:657000000001"].category == UNCATEGORIZED
     assert by_id["md5b"].category == MONEY_RECEIVED
     assert engine.storage.load_merchant_memory() == {}
+
+
+def test_rekey_moves_data_to_a_new_secret(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("rekey", "scripts/rekey.py")
+    rekey = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rekey)
+    src, dst = str(tmp_path / "old.db"), str(tmp_path / "new.db")
+    old = TransactionEngine(src, LEGACY_DEFAULT_SECRET)
+    old.ingest_sms(sms("RAVI", "100000000001", 50, 950), AT)
+    old.storage.save_unparsed_sms("weird sms", AT)
+
+    assert rekey.rekey(src, dst, LEGACY_DEFAULT_SECRET, "brand-new-secret") == 1
+    new = TransactionEngine(dst, "brand-new-secret")
+    t = new.storage.get_all_transactions()[0]
+    assert (t.merchant_name, t.balance) == ("RAVI", 950.0)
+    assert new.storage.get_unparsed_sms() == [(AT.isoformat(), "weird sms")]
+    from cryptography.fernet import InvalidToken
+    with pytest.raises(InvalidToken):
+        TransactionEngine(dst, LEGACY_DEFAULT_SECRET).storage.get_all_transactions()

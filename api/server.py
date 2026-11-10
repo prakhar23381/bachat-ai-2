@@ -6,10 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, File, Header, HTTPException, UploadFile
+from contextlib import asynccontextmanager
+
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from api.telegram_bot import bot_from_env
 from transaction_ml.ingestion.excel_parser import parse_bank_statement
 from transaction_ml.models.core import EXPENSE, Transaction
 from transaction_ml.system import TransactionEngine, load_secret
@@ -20,6 +23,7 @@ if len(API_TOKEN) < 16:
     raise RuntimeError("Set BACHAT_API_TOKEN to a random string of at least 16 characters.")
 
 engine = TransactionEngine(db_path=DB_PATH, secret=load_secret())
+bot = bot_from_env(engine)
 
 
 def require_token(authorization: str = Header(default="")):
@@ -28,7 +32,16 @@ def require_token(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing token")
 
 
-app = FastAPI(title="Bachat AI")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if bot:
+        bot.start()
+    yield
+    if bot:
+        bot.stop()
+
+
+app = FastAPI(title="Bachat AI", lifespan=lifespan)
 api = APIRouter(prefix="/api", dependencies=[Depends(require_token)])
 
 
@@ -117,10 +130,12 @@ def _value_error_to_400(fn, *args):
 # ---- capture -----------------------------------------------------------------
 
 @api.post("/sms")
-def receive_sms(payload: SmsRequest):
+def receive_sms(payload: SmsRequest, background: BackgroundTasks):
     """Called by the iPhone Shortcut for every bank SMS."""
     received_at = _naive_local(payload.received_at) if payload.received_at else datetime.now()
     result = engine.ingest_sms(payload.text, received_at)
+    if bot:
+        background.add_task(bot.on_sms, result)  # don't make the Shortcut wait on Telegram
     return {
         "status": result.status,
         "transaction": TransactionResponse.from_domain(result.transaction) if result.transaction else None,
@@ -143,8 +158,8 @@ async def upload_statement(file: UploadFile = File(...)):
             transactions = parse_bank_statement(temp_path)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to parse file: {e}")
-        added = engine.ingest(transactions)
-        return {"status": "success", "parsed": len(transactions), "added": len(added)}
+        added, enriched = engine.merge_statement(transactions)
+        return {"status": "success", "parsed": len(transactions), "added": added, "enriched": enriched}
     finally:
         os.remove(temp_path)
 

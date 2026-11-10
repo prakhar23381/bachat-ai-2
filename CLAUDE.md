@@ -4,7 +4,14 @@ Real-time personal finance tracker for one user (the owner). Every IDFC FIRST Ba
 is forwarded from the owner's iPhone (iOS Shortcuts automation) to a small always-on
 server, which categorises the transaction immediately. It asks the owner on Telegram
 only when it isn't sure, and learns from each answer. A web dashboard shows history and
-charts. Statement upload (.xlsx/.csv) is kept for backfilling past months.
+charts. Statement upload (.xlsx/.csv) backfills past months and fills in UPI notes.
+
+**The UPI note problem (the owner's top concern):** IDFC SMS don't include the note the
+owner types in the UPI app, and on iPhone nothing can read it from the app. IDFC sends **no
+per-transaction emails** either (checked the owner's Gmail on 2026-11-10: only promotions and
+a monthly password-protected PDF statement). n8n has no workflow that solves this; its Paytm
+node is merchant-only. Chosen design: the **Telegram reply is the note** (asked only for
+unknown payees), and the monthly statement fills in notes afterwards (`merge_statement`).
 
 Repo: https://github.com/prakhar23381/bachat-ai-2 (public, so **never commit statements,
 `*.db`, real SMS text, or real payee names**; test fixtures use made-up names and RRNs).
@@ -14,10 +21,14 @@ Repo: https://github.com/prakhar23381/bachat-ai-2 (public, so **never commit sta
 | Phase | Scope | State |
 |---|---|---|
 | 1 | User's categories (editable), SMS parser and `/api/sms`, token auth, dashboard serving, migration of old data | **done** (branch `realtime`) |
-| 2 | Telegram bot: ask only when unsure (inline category buttons); daily summary; missed-SMS (balance gap) alerts | todo |
-| 3 | Deploy on a free cloud VM (Oracle Always Free / GCP e2-micro) with HTTPS; iOS Shortcut setup guide | todo |
+| 2 | Telegram bot (`api/telegram_bot.py`): asks only for unknown payees; reply = note; note naming a category decides it, else suggest + confirm; daily summary; missed-SMS alerts; `/label` for old payees | **done** (tested against a mock Telegram API; not yet run against real Telegram) |
+| 3 | Deploy kit: `deploy/setup.sh` (Ubuntu 24.04, systemd, Caddy HTTPS on `<ip>.sslip.io`, TZ=Asia/Kolkata), `deploy/update.sh`, `scripts/rekey.py`, `docs/SETUP.md` incl. iOS Shortcut steps | **written, not yet run on a real VM**; the owner has to create the VM and the bot |
+| 3b | Auto-read the emailed monthly PDF statement from Gmail (password-protected) | todo; needs a sample PDF layout |
 | 4 | Splitwise: "Split" button creates an expense (only your share counts as spending); poll `get_expenses` for bills others paid; match settle-ups so nothing is double counted | todo. Personal API key comes from https://secure.splitwise.com/apps (laptop browser); may need Splitwise Pro (unverified) |
-| 5 | Dashboard rework: drop the upload-first flow; Splitwise balances view; split up the 500-line App.tsx | todo |
+| 5 | Dashboard rework: drop the upload-first flow; show notes; Splitwise balances view; split up the 500-line App.tsx | todo |
+
+Priority set by the owner: **get the full loop live on the phone first** (phases 2–3),
+then Splitwise and dashboard polish.
 
 The owner's decisions behind this design are recorded in Claude's project memory
 (`bachat-redesign-decisions`).
@@ -29,12 +40,14 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # once
 export BACHAT_KEY='<long random secret>'          # DB encryption secret
 export BACHAT_API_TOKEN='<random, 16+ chars>'     # bearer token for every /api call
 ./start.sh                                        # API :8000 + Vite UI :5173 (proxies /api)
-.venv/bin/python -m pytest                        # 65 tests, ~3s
+.venv/bin/python -m pytest                        # 78 tests, ~3s
 cd frontend && npm run lint && npm run build      # build -> frontend/dist, served by FastAPI at /
 ```
 
 Env vars: `BACHAT_KEY`, `BACHAT_API_TOKEN` (the server refuses to start without it),
-`BACHAT_DB` (default `transactions.db` in CWD).
+`BACHAT_DB` (default `transactions.db` in CWD), `BACHAT_TELEGRAM_TOKEN` + `BACHAT_TELEGRAM_CHAT_ID`
+(bot is disabled unless both are set), `BACHAT_SUMMARY_HOUR` (default 21), `TZ` (must be
+Asia/Kolkata on the server: all dates are naive local time). Production: `/etc/bachat.env`.
 
 ## How a transaction is categorised (`transaction_ml/system.py`)
 
@@ -47,8 +60,14 @@ Env vars: `BACHAT_KEY`, `BACHAT_API_TOKEN` (the server refuses to start without 
    No weights are persisted. A prediction is accepted only if the probability is
    >= `min_confidence` (0.3) **and** the char n-gram similarity of the payee name to the nearest
    verified payee is >= `min_similarity` (0.3); otherwise the result is Uncategorized.
-4. **Uncategorized** = `needs_review`: the Telegram bot (phase 2) and the dashboard's Active
-   Learning panel ask the user, most frequent payee first.
+4. **Uncategorized** = `needs_review`: the Telegram bot and the dashboard's Active Learning
+   panel ask the user, most frequent payee first.
+
+The similarity gate takes the best of payee-name similarity and **note** similarity, so a new
+vendor with the note "chai" can still be categorised from earlier "chai" rows. Notes are part of
+the model's text features. `apply_note`: a note naming a category (all its words, or a unique
+first word like "mess") is applied as a correction; otherwise the model's guess is only a
+suggestion until the user taps it.
 
 `verified` = the user set this row's category. After every correction or category change,
 **all unverified rows are re-predicted**. Re-imports skip existing ids, so corrections survive.
@@ -71,6 +90,9 @@ categories count in the spending chart.
 ```
 api/server.py           FastAPI. /api router requires `Authorization: Bearer $BACHAT_API_TOKEN`.
                         Serves frontend/dist at / when built (same origin, no CORS).
+                        Starts the bot in its lifespan; /api/sms notifies it via BackgroundTasks.
+api/telegram_bot.py     TelegramBot: long polling (no webhook), owner-only, inline buttons
+                        "c|<category>|<txn_id>". `python -m api.telegram_bot whoami` prints chat ids.
 transaction_ml/
   system.py             TransactionEngine: predict / ingest / ingest_sms / correct /
                         categories / retrain / reclassify; SmsResult; key loading/derivation
@@ -87,9 +109,13 @@ transaction_ml/
                         (PRAGMA user_version, currently 2; backup <db>.bak-v<N> before migrating)
 frontend/src/App.tsx    Whole dashboard: token gate, chart, filters, transaction list with
                         inline re-categorise, split/manual modals, Active Learning, category editor
-tests/                  test_sms_parser, test_realtime (SMS/categories/migration/dedupe),
-                        test_engine, test_ingestion, test_api; conftest has the fixtures
+tests/                  test_sms_parser, test_realtime (SMS/categories/migration/dedupe/rekey),
+                        test_telegram_bot (httpx.MockTransport fake Telegram), test_engine,
+                        test_ingestion, test_api; conftest has the fixtures
 start.sh                Local dev: uvicorn + vite
+deploy/                 setup.sh / update.sh / bachat.service / Caddyfile (see docs/SETUP.md)
+docs/SETUP.md           Owner-facing go-live guide: BotFather, Oracle VM, deploy, rekey, iOS Shortcut
+scripts/rekey.py        Re-encrypt a DB under a new BACHAT_KEY (writes a new file)
 ```
 
 ## API (all under /api, all need the bearer token)
@@ -97,7 +123,7 @@ start.sh                Local dev: uvicorn + vite
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/sms` | `{text, received_at?}` (ISO). Returns `{status: added/duplicate/ignored, transaction, needs_review, balance_gap}`. Unrecognised SMS are stored encrypted in `unparsed_sms` |
-| POST | `/upload` | statement backfill → `{parsed, added}` |
+| POST | `/upload` | statement → `{parsed, added, enriched}`; enriched = SMS rows that got the note + UPI ID |
 | POST | `/transactions/manual` | `{merchant_name, amount, date, notes?}` |
 | GET | `/transactions` | newest first; includes `verified`, `source`, `upi`, `splits` |
 | POST | `/transactions/{id}/correct` | `{category}` → `{transaction, reclassified}` |
@@ -123,6 +149,8 @@ start.sh                Local dev: uvicorn + vite
 
 ## Known limitations
 
+- The engine is guarded by an RLock (`_locked`) because API threads and the bot thread share it.
+- Category names are capped at 24 chars without `|` (they ride in Telegram button payloads).
 - Only IDFC FIRST SMS formats seen so far (UPI debit, credit). Card spends, ATM, NEFT/IMPS and
   autopay SMS are unknown; they land in `unparsed_sms`, so check there and extend `sms_parser.py`.
 - Balance-gap detection assumes SMS arrive in order and that only one account is tracked.
@@ -134,4 +162,5 @@ start.sh                Local dev: uvicorn + vite
 - Mar–Apr 2026: original statement-upload app generated by an older Gemini model.
 - Nov 2026 `cleanup` (PR #1): fixed 7 confirmed bugs (label shuffle after restart, credit
   column misdetection, month/day swap, untrainable model, etc.), replaced SGD with retrained LR.
-- Nov 2026 `realtime`: redesign to SMS → server → Telegram, the user's own categories, auth.
+- Nov 2026 `realtime`: redesign to SMS → server → Telegram, the user's own categories, auth,
+  Telegram bot with notes, deploy kit.

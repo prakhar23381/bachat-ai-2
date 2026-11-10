@@ -1,0 +1,5 @@
+# {HOST} is replaced by setup.sh (e.g. 152-67-1-2.sslip.io); Caddy fetches the HTTPS certificate itself.
+{HOST} {
+    encode gzip
+    reverse_proxy 127.0.0.1:8000
+}

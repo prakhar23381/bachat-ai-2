@@ -28,7 +28,7 @@ def upload(client, body=STATEMENT, name="s.csv"):
 
 
 def test_upload_list_and_reupload_is_idempotent(client):
-    assert upload(client).json() == {"status": "success", "parsed": 3, "added": 3}
+    assert upload(client).json() == {"status": "success", "parsed": 3, "added": 3, "enriched": 0}
     assert upload(client).json()["added"] == 0
     rows = client.get("/api/transactions").json()
     assert [r["merchant_name"] for r in rows] == ["ACME SALARY", "SWIGGY", "SWIGGY"]  # newest first

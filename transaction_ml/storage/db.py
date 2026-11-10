@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS categories (
     position INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS bot_questions (
+    message_id INTEGER PRIMARY KEY,   -- Telegram message that asked about txn_id
+    txn_id TEXT NOT NULL,
+    asked_at TEXT NOT NULL,
+    answered INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS unparsed_sms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     received_at TEXT,
@@ -280,5 +286,35 @@ class EncryptedStorage:
         return [(r[0], self._decrypt(r[1])) for r in rows]
 
 
-_PLACEHOLDERS = ", ".join("?" * len(_TXN_COLUMNS.split(",")))
 
+
+    # ---- Telegram questions ------------------------------------------------------
+
+    def add_question(self, message_id: int, txn_id: str):
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO bot_questions (message_id, txn_id, asked_at, answered) VALUES (?, ?, ?, 0)",
+                (message_id, txn_id, datetime.now().isoformat()),
+            )
+
+    def question_txn(self, message_id: int) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT txn_id FROM bot_questions WHERE message_id = ?", (message_id,)).fetchone()
+        return row[0] if row else None
+
+    def latest_open_question(self) -> Optional[Tuple[int, str]]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT message_id, txn_id FROM bot_questions WHERE answered = 0 ORDER BY asked_at DESC LIMIT 1"
+            ).fetchone()
+
+    def questions_for(self, txn_id: str) -> List[int]:
+        with self._connect() as conn:
+            return [r[0] for r in conn.execute("SELECT message_id FROM bot_questions WHERE txn_id = ?", (txn_id,))]
+
+    def mark_answered(self, txn_id: str):
+        with self._connect() as conn:
+            conn.execute("UPDATE bot_questions SET answered = 1 WHERE txn_id = ?", (txn_id,))
+
+
+_PLACEHOLDERS = ", ".join("?" * len(_TXN_COLUMNS.split(",")))

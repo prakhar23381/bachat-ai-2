@@ -70,6 +70,13 @@ class FeatureExtractor:
             format="csr",
         )
 
-    def merchant_vectors(self, transactions: List[Transaction]) -> csr_matrix:
-        """L2-normalised char n-grams of the merchant name alone (for similarity checks)."""
-        return self.char_vectorizer.transform([normalize_merchant_name(t.merchant_name) for t in transactions])
+    def anchor_vectors(self, transactions: List[Transaction]) -> List[csr_matrix]:
+        """
+        L2-normalised char n-grams of (1) the payee name and (2) the user's note,
+        used to check whether a transaction resembles anything verified before.
+        UPI bank/gateway text is deliberately excluded: it is shared by unrelated payees.
+        """
+        return [
+            self.char_vectorizer.transform([normalize_merchant_name(t.merchant_name) for t in transactions]),
+            self.char_vectorizer.transform([normalize_merchant_name(t.notes or "") for t in transactions]),
+        ]
